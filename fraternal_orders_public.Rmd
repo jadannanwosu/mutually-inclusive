@@ -1,0 +1,880 @@
+---
+title: "Mutually Inclusive: Human Capital Impact of Black Fraternal Orders in Virginia"
+author: "Jeneta Nwosu"
+date: "2026-07-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Setup, echo=FALSE, message=FALSE, warning=FALSE}
+require("tidyverse")
+require("ipumsr")
+require("arrow")
+require("haven")
+require("labelled")
+require("knitr")
+require("kableExtra")
+require("PanelMatch")
+require("ggrepel")
+require("scales")
+# for file loading
+library("boxr")
+library("httr")
+library("httpuv")
+```
+
+# Introduction
+
+The goal of this study is to determine the economic effects of a unique form of historical local institution: Black fraternal orders.
+
+In his 1907 report “Economic Cooperation Among Negro Americans,” W.E.B. Dubois aimed to track mutual aid activities among African American populations in the United States. He surmised:
+
+> “From the fact that there is among Negroes, as yet, little of that great inequality of wealth distribution which marks modern life, nearly all their economic effort tends toward true economic cooperation.”
+
+A large portion of this report was dedicated to charting the efforts and geographic distribution of churches, cooperative businesses, beneficial societies, and what he calls "secret societies." These secret societies are more commonly known in academic literature as fraternal orders or fraternal associations. This kind of organization is marked by a devotion to ritual and a formalized membership process. They often offered benefits like accident, sickness, and funeral insurance as a way to take care of their members.
+
+As Dubois admitted, however, the lines between different voluntary organizations with mutual aid functions can get blurry; it can be hard to draw a line between fraternal orders and beneficial societies since many beneficial societies "have more or less ritual work, and the regular secret societies do much fraternal insurance business," and it's difficult to distinguish beneficial societies and professionalized insurance firms "save in membership and extent of business."
+
+To sidestep the issue of distinction, I defer to a list of fraternal orders compiled by another scholar. I evaluate their impact using occupational outcomes measured in Census data. Hypothetically, these organizations could help Black workers attain better compensated jobs through access to a more powerful social network and better protection against idiosyncratic shocks.
+
+# Fraternal Order Data
+
+I scraped this dataset from a website focused solely on providing information about historical African American fraternal orders: <https://african-american-fraternal-orders.org/>. This site is maintained by Dr. Theda Skocpol (Harvard) and her research team.
+
+```{r fraternal data reading}
+
+# Reading in fraternal order dataframe
+df_fraternals <- read_csv('fraternal_orders_with_no_text.csv') 
+
+# Creating a character vector of state names
+all_states <- c(state.name)
+# Filtering out Washington State to avoid conflicts with extracting Washington, DC from place name column
+all_states <- all_states[all_states != "Washington"] 
+
+# Creating a regex pattern
+pattern <- paste(all_states, collapse = "|")
+
+
+
+```
+
+# Data Cleaning and Exploration - Fraternal Orders
+
+Virginia has the highest amount of headquarters, so for simplicity's sake I focus only on Virginia for the remainder of this study.
+
+```{r fraternal data exploration}
+
+# This adds a new column with state names extracted from the `founding_place` column using the regex pattern
+df_fraternals_temp <- df_fraternals %>%
+  mutate(org_state = str_extract(founding_place, regex(pattern, ignore_case = TRUE))) %>%
+  mutate(org_state = if_else( grepl("District of Columbia", founding_place), "District of Columbia", 
+                        if_else(grepl("Washington", founding_place), "Washington", org_state)))
+
+# Looking at the count of fraternal orders by state
+
+state_counts <- df_fraternals_temp %>%
+  group_by(org_state) %>%
+  summarize(count = n()) %>%
+  arrange(-count) %>%
+  ungroup()
+
+# State count bar graph
+ state_counts %>%
+  drop_na() %>%
+  filter(count > 1) %>%
+  ggplot(aes(x = reorder(org_state, -count), y = count)) +
+  geom_bar(stat = 'identity', fill = 'maroon') +
+  labs(title ="States With >1 Fraternal Order Headquarters", y = "Amount of HQs", x = "State")+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = -35, vjust = 0, hjust = 0.25))
+
+# Let's view this information in map form
+require(usmap)
+require(sf)
+require(tigris)
+ 
+ # Renaming column so usmap package understands
+to_plot_states <- state_counts %>%
+  mutate(state = org_state)
+
+# Only useful if state labels are retained on the map, but I've dropped them for now
+# centroids <- usmapdata::centroid_labels("states") %>%
+#   mutate(X = st_coordinates(.)[,1],
+#          Y = st_coordinates(.)[,2])
+
+
+# Plotting map
+  plot_usmap(
+  regions = 'state',
+  exclude =c('Alaska','Hawaii'),
+  data = to_plot_states,
+  values = "count",
+  label_color = "black"
+) + scale_fill_gradient(
+    low = "white", 
+    high = "maroon",
+    name = "Number of Organizations"
+  ) +
+    labs(title = "Geographic Distribution of Fraternal Orders in Skocpol's Data")
+
+# Looking at count of fraternal orders by decade
+decade_counts <- df_fraternals_temp %>%
+   arrange(founding_year) %>%
+   mutate(decade = founding_year - (founding_year %% 10)) %>%
+   group_by(decade) %>%
+   summarize(count = n()) %>%
+  arrange(-count)
+
+# Decade count bar graph 
+ decade_counts %>%
+  drop_na() %>%
+  filter(count > 1) %>%
+  ggplot(aes(x = reorder(decade, decade), y = count)) +
+  geom_bar(stat = 'identity', fill = 'darkred') +
+  labs(title ="Decades Fraternal Orders Were Founded in Skocpol's Data", y = "Amount of Organizations", x = "Decade")+
+  theme_bw()+
+   scale_x_discrete(labels = function(x) paste0(x, "s"))
+
+
+
+# Creating a subset of the fraternal order dataframe including only organizations headquartered in Virginia
+# This step also creates a new column for founding cities
+# The one organization whose city is listed as "Hampton Roads region" was assigned to Norfolk for better matching. Based on their profile mentioning the headquarters was on the eastern half of Hampton Roads, this is a decently accurate estimate.
+va_fraternals <- df_fraternals_temp %>%
+  filter(org_state == "Virginia") %>%
+  mutate(org_city = str_extract(founding_place,"^[^,]+")) %>%
+  mutate(org_city = ifelse(org_city == 'Hampton Roads region',"Norfolk",org_city)) 
+
+# Creating summary table of Virginia HQ fraternal orders
+va_tibble <- va_fraternals %>%
+  select(org_name, founding_year, founding_place, later_headquarters, geographic_scope)
+
+# Pretty table with kable
+va_tibble %>%
+  kable(booktabs = TRUE, col.names = c("Organization", "Founding Year","Founding Place", "Later Headquarters?", "Geographic Scope"), caption = "Summary of Fraternal Orders Founded in Virginia") %>%
+  kable_styling(latex_options = c("striped", "hold_position"))
+
+# Summary map of VA fraternal orders
+require(tidygeocoder)
+
+va_fraternals_city_counts <- va_fraternals %>%
+  group_by(org_city) %>%
+  summarize(city_count = n()) %>%
+  ungroup()
+
+orders_locs <- geocode(va_fraternals, city = 'org_city', state = "org_state") 
+
+located_counts <- orders_locs %>%
+  right_join(va_fraternals_city_counts) %>%
+  select(lat, long, org_city, city_count) %>%
+  unique()
+
+to_map_orders  <- orders_locs %>%
+  group_by(org_city) %>%
+  mutate(group_rank = row_number()) %>%
+  mutate(group_rank = ifelse(group_rank < 4, group_rank, group_rank+1)) %>%
+  mutate(org_name = ifelse(row_number() > 3, paste("And", n()-3, "more"), org_name)) %>%
+  mutate(group_rank = ifelse(startsWith(org_name, "And"), 4, group_rank)) %>%
+  arrange(group_rank) %>%
+  filter(row_number() < 5) %>%
+  ungroup() %>%
+  unique() %>%
+  mutate(founding_year = ifelse(startsWith(org_name, "And"), "", founding_year))
+
+
+
+va_counties <- counties(state = "VA", cb = TRUE, class = "sf")
+
+# Map of Virginia
+wide_map <- ggplot(data = va_counties) +
+  geom_sf(fill = "lightyellow", color = "gray") +
+  theme_void()+
+  geom_point(shape = 23, stroke = 1, data=located_counts, aes(x=long, y=lat, size = city_count), fill = 'lightblue', color="blue")+ ggrepel::geom_text_repel(data = located_counts, aes(x=long, y=lat, label = org_city), size = 3, nudge_x = 1)+
+  theme(plot.background = element_rect(fill = "white"))+
+  labs(title = "Virginia Black Fraternal Order Founding Locations 1878-1916, \n Following Skocpol", size = 'Fraternal Org Count')
+wide_map
+# Zoomed
+set.seed(42)
+zoomed_map <- ggplot(data = va_counties) +
+  geom_sf(fill = "lightyellow", color = "gray") +
+  theme_void()+
+  geom_point(shape = 23, stroke = 1, data=located_counts, aes(x=long, y=lat, size = city_count), fill = 'lightblue', color="blue") +
+  coord_sf(xlim = c(-79, -75.0), 
+    ylim = c(36.5, 38)) +
+  labs(size = 'Fraternal Org Count')+
+  ggrepel::geom_label_repel(data = to_map_orders, aes(x=long, y=lat, label = paste(strtrim(org_name, 30), founding_year, sep = ' ... '), fill = startsWith(org_name, "And")), size = 5,  nudge_y = -0.1, force = 3.5, nudge_x = -0.2, force_pull = 5)+
+  scale_fill_manual(values = c(
+    'TRUE'   = "pink",
+    'FALSE' = "white"
+  )) +
+  guides(fill = "none")
+require(cowplot)
+set.seed(42)
+
+zoomed_map + labs(title = "Virginia Black Fraternal Order Founding Headquarters 1878-1916, \n Following Skocpol") + theme(plot.title = element_text(size = 20))
+
+# Combined plot
+# ggdraw(zoomed_map) + ggtitle("Virginia Black Fraternal Order Founding Headquarters 1878-1916, \n Following Skocpol") +
+#   theme(plot.title = element_text(size = 20)) +
+#   draw_plot(wide_map, x = 0.55, y = 0.65, width = .4, height = .4)
+  
+
+
+```
+
+
+
+# Data Cleaning and Exploration - IPUMS MLP linked census data 1870-1930
+
+The first Virginia organization was founded in 1878, so my census data extract begins in 1870 to provide a short pre-period. Using linked census data allows me to follow the same individuals across time and be able to track the impact of the appearance of a fraternal order headquarters when it is founded and over time.
+
+For my outcome variable, I will be using `OCCSCORE`, which estimates the economic status of an occupation based its the median earnings in 1950. For more information on this variable, see the IPUMS page [here](https://usa.ipums.org/usa-action/variables/OCCSCORE#description_section "link to ipums.org description on OCCSCORE").
+
+Steven Ruggles, Nesile Ozder, Catherine A. Fitch, Matthew Sobek, Julia A. Rivera Drew, J. David Hacker, Jonas Helgertz, Cheyenne Lonobile, Matt A. Nelson, Evan Roberts, and John Robert Warren. IPUMS Multigenerational Longitudinal Panel: Version 2.0 [dataset]. Minneapolis, MN: IPUMS, 2025. <https://doi.org/10.18128/D016.V2.0>
+
+```{r filtering IPUMS data}
+
+# This reads in an IPUMS data extract of linked census data that is prefilted to only include Virginia residents
+ddi <- read_ipums_ddi("usa_00005.xml")
+data <- read_ipums_micro(ddi)
+
+# Filtering for only Black residents
+black_virginia_census <- data %>%
+  filter(RACE == 2)
+
+# Count: how many observations are there for every decennial census?
+black_virginia_census %>% 
+  group_by(YEAR) %>%
+  summarise(count = n())
+
+# Histogram - Distribution of Occupation Score
+black_virginia_census %>% 
+  ggplot(aes(x = OCCSCORE)) +
+  geom_histogram(fill = 'darkred',binwidth = 10) +
+  stat_bin(
+    binwidth = 10, 
+    geom = "text", 
+    aes(label = after_stat(format(count, big.mark = ",", scientific = FALSE)), fontface = 'bold'), 
+    vjust = -0.5, 
+    size = 5
+  )+
+  theme_bw()+
+  labs(title ="Distribution of African-American Occupation Score in Virginia Across All Years", y = "Count", x = "Occupation Score (0-80)", caption = "Note: Values of 0 represent that the measure is not applicable (NA)")+
+  scale_y_continuous(labels = scales::label_comma())
+
+# Boxplot - Distribution of Occupation Score by Census Year
+black_virginia_census %>% 
+  ggplot(aes(x = as.factor(YEAR), y = OCCSCORE)) +
+  geom_boxplot(color = 'darkred')+
+  theme_bw()+labs(title ="Distribution of African-American Occupation Score in Virginia Over Time", y = "Occupation Score (0-80)", x = "Census Year")
+
+  
+```
+
+# Summary Stats for Treated Cities in 1870
+
+```{r 1870_later_treated}
+
+# In order: charlotte county (includes charlotte court house), warwick county (includes newport news), norfolk (includes norfolk city and portsmouth), and Henrico County (Richmond) 
+# In the modern day, all are independent cities not included in counties except for Charlotte Court House. But in 1870, they were subsumed within counties.
+fraternals_county_code <- c(0370, 1875, 1290, 0870)
+
+blk_va_census_1870 <- black_virginia_census %>%
+  filter(YEAR == 1870) %>% mutate(across(
+    c(REALPROP, AGE, OCCSCORE, EDSCOR50, LIT, SCHOOL),
+    ~ lbl_na_if(.x, ~ .lbl == "N/A"))) %>%
+  mutate(LIT = ifelse(LIT == 4, 1, 0), SCHOOL = ifelse(SCHOOL == 2, 1, 0)) # Make literacy binary so that full reading and writing is the definition of literate and recode binary school variable
+
+blk_va_census_1870_summary <- blk_va_census_1870 %>%
+  select(REALPROP, AGE, OCCSCORE, EDSCOR50, LIT, SCHOOL) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = T))) %>% 
+  mutate(COUNTYICP = "All Counties")
+
+blk_va_census_1870_treated_summary <- blk_va_census_1870 %>%
+  filter(COUNTYICP %in% fraternals_county_code) %>%
+  select(COUNTYICP, REALPROP, AGE, OCCSCORE, EDSCOR50, LIT, SCHOOL) %>%
+  group_by(COUNTYICP) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = T))) %>%
+  mutate(COUNTYICP = as.character(COUNTYICP))
+
+blk_school_county_u_10 <- blk_va_census_1870 %>%
+  filter(COUNTYICP %in% fraternals_county_code) %>%
+  filter(AGE <= 10) %>%
+  select(COUNTYICP, SCHOOL) %>%
+  group_by(COUNTYICP) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = T))) %>%
+  mutate(COUNTYICP = as.character(COUNTYICP))
+
+blk_school_u_10 <- blk_va_census_1870 %>%
+  filter(AGE <= 10) %>%
+  select(COUNTYICP, SCHOOL) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = T))) %>% 
+  mutate(COUNTYICP = "All Counties")
+
+blk_school <- bind_rows(blk_school_county_u_10, blk_school_u_10) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  mutate(
+    COUNTYICP = case_when(
+      COUNTYICP == 0370 ~ "Charlotte",
+      COUNTYICP == 1875 ~ "Warwick",
+      COUNTYICP == 1290 ~ "Norfolk",
+      COUNTYICP == 0870 ~ "Henrico", 
+      .default     = "All Other Counties"
+    ))
+
+
+summary_1870_full <- bind_rows(blk_va_census_1870_treated_summary, blk_va_census_1870_summary) %>%
+  mutate(across(where(is.numeric), round, 3)) %>%
+  mutate(
+    COUNTYICP = case_when(
+      COUNTYICP == 0370 ~ "Charlotte",
+      COUNTYICP == 1875 ~ "Warwick",
+      COUNTYICP == 1290 ~ "Norfolk",
+      COUNTYICP == 0870 ~ "Henrico", 
+      .default     = "All Other Counties"
+    ))
+
+summary_1870_full %>%
+  ggplot(aes(x = COUNTYICP, y = REALPROP))+
+  geom_bar(stat = "identity",fill = 'darkred')+
+  theme_bw()+labs(title ="Black Real Estate and Property Value 1870, Virginia", y = "Property Value (1870 Dollars)", x = "County")
+
+summary_1870_full %>%
+  ggplot(aes(x = COUNTYICP, y = LIT))+
+  geom_bar(stat = "identity",fill = 'darkblue')+
+  theme_bw()+labs(title ="Black Literacy 1870, Virginia", y = "Share Reading and Writing", x = "County")
+summary_1870_full %>%
+  ggplot(aes(x = COUNTYICP, y = OCCSCORE))+
+  geom_bar(stat = "identity",fill = 'blue')+
+  theme_bw()+labs(title ="Black Occupation Score 1870, Virginia", y = "Occupation Score (0-80)", x = "County")
+blk_school %>%
+  ggplot(aes(x = COUNTYICP, y = SCHOOL))+
+  geom_bar(stat = "identity",fill = 'darkred')+
+  theme_bw()+labs(title ="Black Children 10 Years and Under in School 1870, Virginia", y = "Share Black Children <10 in School", x = "County")
+
+census_summary_1870 <- summary_1870_full %>%
+  mutate(REALPROP = scales::dollar(REALPROP)) %>%
+  kable(col.names = c("County", "Property Value", "Age", "Occ. Score", "Ed. Score", "Literacy Rate", "Fraction in School"), caption = "Average Values in 1870 Census by County", format = "latex") %>%
+  kable_styling(latex_options = c("striped", "hold_position")) %>%
+  footnote(general = "Education Score and Occupation Score are scores constructed by IPUMS. They come from 1950 percentage college educated and 1950 median earnings of the respondent's occupation", threeparttable = TRUE)
+
+  
+
+# County level data
+
+# Read in NHGIS file
+
+df_county_stats <- read_csv("nhgis0001_ds17_1870_county.csv")
+# Recall our table of cities
+va_fraternals_city_counts
+
+
+rename_nhgis <- function(df) {
+  df %>%
+    rename(
+      population_total         = AKC001,
+      farm_orchard_value       = AKN001,
+      farm_market_garden_value = AKN002,
+      farm_forest_value        = AKN003,
+      farm_home_mfg_value      = AKN004,
+      farm_slaughter_value     = AKN005,
+      farm_livestock_value     = AKN006,
+      property_true_value      = AK0001
+    )
+}
+
+
+
+
+fraternals_counties <- df_county_stats %>% 
+  filter(STATEICP == 40 & COUNTYICP %in% fraternals_county_code) %>%
+  select(COUNTYICP, AKC001, AK0001, AKN001,AKN002,AKN003,AKN004,AKN005,AKN006) %>%
+   mutate(
+    COUNTYICP = case_when(
+      COUNTYICP == 0370 ~ "Charlotte",
+      COUNTYICP == 1875 ~ "Warwick",
+      COUNTYICP == 1290 ~ "Norfolk",
+      COUNTYICP == 0870 ~ "Henrico", 
+      .default     = "All Other Counties"
+    ))
+  
+
+
+fraternals_counties <- rename_nhgis(fraternals_counties)
+
+label_lookup <- c(
+  COUNTYICP = "County",
+  population_total = "Total Population",
+  farm_orchard_value = "Orchard Products",
+  farm_market_garden_value = "Market Garden Produce",
+  farm_forest_value = "Forest Products",
+  farm_home_mfg_value = "Home Manufactures",
+  farm_slaughter_value = "Animals Slaughtered or Sold",
+  farm_livestock_value = "All Livestock",
+  property_true_value = "Property Value"
+)
+
+fraternals_counties %>%
+  ggplot(aes(x = COUNTYICP, y = population_total))+
+  geom_bar(stat = "identity",fill = 'darkblue')+
+  theme_bw()+labs(title ="Total Population 1870, Virginia", y = "County Population", x = "County")
+  
+
+
+county_summary_table <- fraternals_counties %>%
+  mutate(across(-c(COUNTYICP, population_total), ~ dollar(.x))) %>%
+  kable(col.names = unname(label_lookup[names(fraternals_counties)]), caption = "Summary of Counties Containing Treated Locations", format.args = list(big.mark = ","), format = "latex") %>%
+  kable_styling(latex_options = c("striped", "hold_position")) %>%
+  footnote(general = "All columns except population are monetary valuations in 1870 U.S. dollars. Property value is true value, not the assessed value.")
+save_kable(census_summary_1870, "census_county_table.tex")
+save_kable(county_summary_table, "county_table.tex")
+
+```
+
+# Census Place Project Crosswalks
+
+The Census Place Project provides crosswalks to link Census individuals to specific places on the sub-county level. This is useful because our fraternal order data specifies headquarter locations on the city level.
+
+Berkes, Enrico, Karger, Ezra, and Nencka, Peter. The Census Place Project: A Method for Geolocating Unstructured Place Names. Ann Arbor, MI: Inter-university Consortium for Political and Social Research [distributor], 2023-03-28. https://doi.org/10.3886/E179401V2
+
+```{r place proj city crosswalks, include=FALSE}
+
+merge_crosswalks <- function(ipums_data,
+                             box_folder_id,
+                             state_fips = 51,
+                             output_csv = NULL,
+                             output_parquet = NULL) {
+
+
+  ## ------------------------------------------------------------
+  ## Locate crosswalk files in Box
+  ## ------------------------------------------------------------
+
+  files <-
+    box_ls(box_folder_id) %>% as.data.frame() %>%
+    filter(
+      grepl("^histid_place_crosswalk_[0-9]{4}\\.csv$", name)
+    ) %>%
+    mutate(
+      year = as.integer(str_extract(name, "[0-9]{4}"))
+    ) %>%
+    arrange(year)
+
+  message("Found ", nrow(files), " crosswalk files.")
+
+  ## ------------------------------------------------------------
+  ## Convert IPUMS data to Arrow
+  ## ------------------------------------------------------------
+
+  ipums_arrow <-
+
+    ipums_data %>%
+
+    remove_labels() %>%
+
+    as_arrow_table() %>%
+
+    mutate(
+      HISTID = as.character(HISTID),
+      YEAR = as.integer(YEAR),
+      STATEFIP = as.integer(STATEFIP),
+      RACE = as.integer(RACE)
+    ) %>%
+
+    filter(
+      STATEFIP == state_fips,
+      RACE == 2
+    )
+
+  ## ------------------------------------------------------------
+  ## Join one census year at a time
+  ## ------------------------------------------------------------
+
+  joined_years <- vector("list", length(files$id))
+
+  for(i in seq_along(files$id)) {
+
+    yr <- files$year[i]
+
+    message("Processing ", yr)
+
+    tmp <- tempfile(fileext = ".csv")
+
+    box_dl(
+      file_id = files$id[i],
+      local_dir = dirname(tmp),
+      file_name = basename(tmp),
+      overwrite = TRUE
+    )
+
+    cw <-
+
+      read_csv_arrow(
+        tmp,
+        as_data_frame = FALSE,
+        col_select = c(
+          "histid",
+          "potential_match",
+          "county_fips_geomatch",
+          "state_fips_geomatch"
+        )
+      )
+
+    if ("state_fips_geomatch" %in% names(cw)) {
+
+      cw <-
+
+        cw %>%
+
+        filter(
+          state_fips_geomatch == state_fips
+        )
+
+    }
+
+    joined_years[[i]] <-
+
+      ipums_arrow %>%
+
+      filter(YEAR == yr) %>%
+
+      left_join(
+
+        cw %>%
+
+          mutate(
+            HISTID = toupper((cast(histid, utf8())))
+          ) %>%
+
+          select(
+            HISTID,
+            potential_match,
+            county_fips_geomatch
+          ),
+
+        by = join_by(HISTID)
+
+      ) %>%
+
+      collect()
+
+    unlink(tmp)
+
+    rm(cw)
+
+    gc(verbose = FALSE)
+
+  }
+
+  ## ------------------------------------------------------------
+  ## Combine all census years
+  ## ------------------------------------------------------------
+
+  joined <-
+
+    bind_rows(joined_years)
+
+  ## ------------------------------------------------------------
+  ## Optional outputs
+  ## ------------------------------------------------------------
+
+  if (!is.null(output_csv)) {
+
+    message("Writing CSV...")
+
+    readr::write_csv(
+      joined,
+      output_csv
+    )
+
+  }
+
+  if (!is.null(output_parquet)) {
+
+    message("Writing Parquet...")
+
+    write_parquet(
+      joined,
+      output_parquet
+    )
+
+  }
+
+  joined
+
+}
+
+joined_cw <-
+  merge_crosswalks(
+    ipums_data = black_virginia_census,
+    box_folder_id = "insert_id_here",
+    output_parquet = "joined_crosswalk.parquet"
+  )
+
+```
+
+```{r}
+# full joining workflow visible in Rmd file
+joined_cw <- read_parquet("joined_crosswalk.parquet")
+
+```
+
+# Further Place-related Cleaning
+
+```{r Join individuals to their location across time}
+
+joined_cw <-
+
+  joined_cw %>%
+
+  mutate(
+    COUNTYNHG = as.character(COUNTYNHG),
+
+    potential_match =
+      if_else(
+        grepl("^5100370", COUNTYNHG),
+        "charlotte court house",
+        potential_match
+      ),
+
+    COUNTYNHG = as.integer(COUNTYNHG)
+  )
+
+# Finding the consistent IDs across time (`HIK`) for individuals who appear >1 year
+linked_IDs <- joined_cw %>%
+
+    count(HIK) %>%
+
+    filter(n >= 4)
+
+joined_cw <- joined_cw %>%
+
+    semi_join(
+        linked_IDs,
+        by = "HIK"
+    )
+
+mobility <- joined_cw %>%
+  group_by(HIK) %>%
+    summarise(
+      moved = n_distinct(potential_match) > 1
+      )
+
+
+
+joined_cw <-
+  joined_cw %>%
+
+    left_join(
+        mobility,
+        by = "HIK"
+    )
+
+
+# Missingness
+joined_cw %>%
+    group_by(YEAR) %>%
+    summarise(
+        pct_missing =
+            mean(is.na(potential_match)),
+        n = n()
+    )
+
+
+joined_cw <- joined_cw %>%
+  drop_na(potential_match)
+
+# Count - how many observations are left?
+final_obs_tbl <- joined_cw %>% 
+  group_by(YEAR) %>%
+  summarise(Observations = n()) %>%
+  ungroup()
+
+total_row <- final_obs_tbl %>%
+  mutate(`Census Year` = as.character(YEAR)) %>%
+  select(-YEAR) %>%
+  relocate(`Census Year`, Observations) %>%
+  bind_rows(
+    summarise(., 
+              across(where(is.numeric), sum),
+              across(where(is.character), ~ "Total")
+    )
+  )
+
+
+
+
+
+```
+
+# Creating a Full Panel
+
+In preparation for a time series panel difference-in-differences implementation, the census data now must be merged with the fraternal data in the form and units must be identified as treated and untreated. We will end up with observations aggregated at the city level (which means `OCCSCORE` ends up averaged across a city). A city is considered treated at some point in time if there was a fraternal headquarters present in the city at that time. 
+
+```{r Creating panel}
+
+# Creating a blank panel with city-census year pairs
+
+census_years <- unique(joined_cw$YEAR)
+fraternal_panel <- crossing(
+  org_city = unique(va_fraternals$org_city),
+  census_year = census_years
+  
+)
+
+
+
+# Filling in the panel with treatments
+
+fraternals_treated <- fraternal_panel %>%
+  left_join(va_fraternals, by = "org_city",
+            relationship = "many-to-many") %>%
+  filter(founding_year <= census_year) %>%
+  group_by(org_city, census_year) %>%
+  summarise(treat_dose = n(),
+            .groups = "drop") %>% # `treat_dose` is a discrete countable variable that counts how many organizations are in the city in a given year
+  right_join(fraternal_panel, by = c("org_city", "census_year")) %>%
+  mutate(treat_dose = replace_na(treat_dose, 0)) %>%
+  group_by(org_city) %>%
+  mutate(first_treated_census =                                        min(census_year[treat_dose > 0])) %>%
+  ungroup() %>%
+  mutate(org_city = tolower(org_city)) # `potential_match` is lowercase so this transformation allows for merging
+
+# Merging city-census year treatment with census data for individuals in that city in that year
+census_treatment_merge <- joined_cw %>%
+  # In the Census Place Project crosswalk, Newport News appears as just "newport". This line renames it before merging
+  mutate(
+        potential_match =
+            if_else(
+                potential_match == "newport",
+                "newport news",
+                potential_match
+            )) %>%
+  left_join(fraternals_treated, by = join_by('potential_match' == 'org_city', 'YEAR' == 'census_year'))
+
+# Summarize - What percentage of Virginia cities in the panel are never treated?
+census_treatment_merge %>%
+  summarise(
+    n_unmatched   = sum(is.na(treat_dose)),
+    pct_unmatched = mean(is.na(treat_dose))
+  )
+
+# Replace NAs in `treat_dose`, `first_treated_census` with values associated with not-yet-treated (treat_dose == zero) and never-treated (first_treated_census == Inf) units
+census_treatment_merge <- census_treatment_merge %>%
+  mutate(
+    first_treated_census = as.numeric(first_treated_census)
+  ) %>%
+  mutate(treat_dose = replace_na(treat_dose, 0), first_treated_census = replace_na(first_treated_census, Inf))
+
+
+
+```
+
+# Synthetic control + Results
+
+
+```{r Results}
+# Check attributes for treated cities
+
+library(fect)
+library(panelView)
+# Aggregate panel according to location, averaging `OCCSCORE` by city
+# Each observation is now a city instead of an individual
+
+city_panel <- census_treatment_merge %>%
+  group_by(potential_match, YEAR) %>%
+  summarise(
+    avg_occscore = mean(OCCSCORE, na.rm = TRUE),
+    dose = first(treat_dose),
+    sd_occscore = sd(OCCSCORE, na.rm = TRUE),
+    n_obs   = n(),
+    .groups = "drop"
+  ) %>%
+  group_by(potential_match) %>%
+  mutate(
+    treated = as.integer(dose > 0)
+  ) %>%
+  ungroup()
+
+panelview(avg_occscore ~ treated, data = city_panel, index = c("potential_match", "YEAR"),
+          pre.post = TRUE)
+
+set.seed(42)
+
+out <- fect::fect(
+  method = 'gsynth',
+  avg_occscore ~ treated,
+  data = city_panel,
+  index = c("potential_match", "YEAR"),
+  force = "two-way",
+  CV = TRUE,
+  r = c(0,5),
+  se = TRUE,
+  min.T0 = 1,
+  vartype = "parametric"
+)
+
+out$est.avg
+out$est.att
+
+
+overall_tbl <- tibble(
+  Estimate = c("Obs. weighted", "Units weighted"),
+  ATT = c(out$att.avg, out$att.avg.unit),
+  SE = c(out$est.avg[2], out$est.avg.unit[2]),
+  Lower = c(out$est.avg[3], out$est.avg.unit[3]),
+  Upper = c(out$est.avg[4], out$est.avg.unit[4]),
+  p = c(out$est.avg[5], out$est.avg.unit[5])
+) 
+
+overall_tbl <- overall_tbl %>%
+  mutate(
+    ATT = sprintf("%.3f", ATT),
+    CI = sprintf("(%.3f, %.3f)", Lower, Upper),
+    p = sprintf("%.4f", p)
+  ) %>%
+  select(`Estimate`, ATT, CI, p) %>% kable(caption = "ATT Summary Table", format = "latex")
+  
+
+event_tbl <-
+  as.data.frame(out$est.att) %>%
+  rownames_to_column("Event time") %>%
+  rename(
+    ATT = ATT,
+    SE = `S.E.`,
+    Lower = CI.lower,
+    Upper = CI.upper,
+    p = p.value,
+    N = count
+  ) 
+
+event_tbl <-
+  event_tbl %>%
+  mutate(
+    ATT = sprintf("%.3f", ATT),
+    CI = sprintf("(%.3f, %.3f)", Lower, Upper),
+    p = sprintf("%.4f", p)
+  ) %>%
+  select(`Event time`, ATT, CI, p, N) %>% kable(caption = "Event Study Estimate Table", format = "latex")
+
+summary(out)
+
+plot(out, ylab = "Effect on Occupation Score", main = "Estimated Dynamic Treatment Effect of Fraternal HQ on Occupation Score", xlab = "Time Since First Headquarters in City (Census Years)", show.count = FALSE)+ scale_x_continuous(labels = function(x) x * 10)+labs(caption = "Note: Be cautious in interpreting x-axis as 1890 census year is missing.")
+
+
+plot(out, type = "counterfactual", main = "Average Treated Trajectory of Occupation Score Versus Estimated Counterfactual", xlab = "Time Since First Headquarters in City (Census Years)", ylab = "Occupation Score", show.count = FALSE, legend.pos = "top")+
+  scale_x_continuous(labels = function(x) x * 10)+labs(caption = "Note: Be cautious in interpreting x-axis as 1890 census year is missing.")
+
+
+
+plot(out, type = "box", ylab = "Effect On Occupation Score", xlab = "Time Since First Headquarters in City (Census Years)")
+plot(out, type = "counterfactual", id = "norfolk", title = "Treated Average Trajectory of Occupation Score Versus Estimated Counterfactual (Norfolk)")
+plot(out, type = "counterfactual", id = "newport news",  title = "Treated Average Trajectory of Occupation Score Versus Estimated Counterfactual (Newport News)")
+plot(out, type = "counterfactual", id = "charlotte court house")
+plot(out, type = "counterfactual", id = "richmond")
+plot(out, type = "counterfactual", id = "portsmouth")
+
+```
